@@ -1,8 +1,16 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from ad import adnumber
+from ad.admath import *
+
+def sign_func(x, y):
+    if x >= y:
+        return 1
+    else:
+        return 0
 
 class MonteCarloPricer():
-    def __init__(self, S_0, K, T, r, sigma, num_sims, option_type):
+    def __init__(self, random_seed, S_0, K, T, r, sigma, num_sims, option_type):
         self.S_0 = S_0
         self.K = K
         self.T = T
@@ -14,81 +22,67 @@ class MonteCarloPricer():
         self.num_steps = int(T * 252)
         self.dt = self.T / self.num_steps
 
+        self.random_seed = random_seed
+
+
     """
     calculate option price at each time step t by averaging and discounting to present value.
     """
     def calc_option_price(self):
-        np.random.seed(42)
-        option_prices_array = np.zeros((self.num_steps + 1, self.num_sims))
-
-        for step in range(self.num_steps + 1):
-            for sim in range(self.num_sims):
-                S_t = self.S_0
-                for item in range(step):
-                    z = np.random.normal(0, 1)
-                    S_t *= np.exp((self.r - 0.5 * self.sigma ** 2) * self.dt + self.sigma * np.sqrt(self.dt) * z)
-                if self.option_type == 'call':
-                    option_price = max(S_t - self.K, 0)
-                else:
-                    option_price = max(self.K - S_t, 0)
-                option_prices_array[step, sim] = option_price
-
-        average_option_prices = np.mean(option_prices_array, axis=1)
+        np.random.seed(self.random_seed)
         
-        # Discount all the option prices to present time
+        underlying_prices_array = np.zeros((self.num_steps + 1, self.num_sims))
+        payoff_array = np.zeros((self.num_steps + 1, self.num_sims))
+        
+        z_array = np.random.normal(0, 1, size=(self.num_steps, self.num_sims))
+
+        S_t = self.S_0 * np.exp(np.cumsum((self.r - 0.5 * self.sigma ** 2) * self.dt + self.sigma * np.sqrt(self.dt) * z_array, axis=0))
+
+        underlying_prices_array[1:, :] = S_t
+        
+        if self.option_type == 'call':
+            payoff_array[1:, :] = np.maximum(S_t - self.K, 0)
+        elif self.option_type == 'put':
+            payoff_array[1:, :] = np.maximum(self.K - S_t, 0)
+        else:
+            raise ValueError(f"{self.option_type} is not defined.")
+        
+        average_option_prices = np.mean(payoff_array, axis=1)
+
         discounted_option_prices = average_option_prices * np.exp(-self.r * np.arange(self.num_steps + 1) * self.dt)
+        option_price = discounted_option_prices[-1]
         
-        return option_prices_array, discounted_option_prices
+        return underlying_prices_array, discounted_option_prices, option_price
     
 
     """
-    Plot option price at each time step t.
+    Estimate delta, vega, rho using automatic differentiation method.
     """
-    def plot_option_price(self, option_prices):
-        plt.plot(np.arange(self.num_steps, option_prices, label = 'Option Price'))
-        plt.xlabel('Time Step')
-        plt.ylabel('Option Price')
-        plt.title('Option Price at Each Time Step')
-        plt.legend()
-        plt.grid(True)
-        plt.show()
+    def calc_option_greeks(self):
+        S_0 = adnumber(self.S_0)
+        sigma = adnumber(self.sigma)
+        r = adnumber(self.r)
 
-    """
-    Estimate delta for the option price at time step t by recalculating option price at time step t with underlying
-    asset prices S +- eplison and apply the formula (option_price_up - option_price_down) / (2 * epsilon * self.S_0).
-    """
-    def calc_option_delta(self, epsilon):
-        deltas = np.zeros(self.num_steps + 1)
+        sum_payoff = 0
+        for sim in range(self.num_sims):
+            S_t = S_0
+            z_array = np.random.normal(0, 1, size=(self.num_steps, 1))
+            
+            for step in range(1, self.num_steps+1):
+                S_t = S_t * exp((r - 0.5 * sigma ** 2) * self.dt + sigma * sqrt(self.dt) * float(z_array[step-1]))
+            
+            if self.option_type == 'call':
+                payoff = max(S_t - self.K, 0)
+            elif self.option_type == 'put':
+                payoff = max(self.K - S_t, 0)
+            else:
+                raise ValueError(f"{self.option_type} is not defined.")
+            sum_payoff = sum_payoff + payoff
         
-        for step in range(self.num_steps + 1):
-
-            S_up = self.S_0 * (1 + epsilon)
-            option_prices_array_up, _ = self.calc_option_price(S_up)
-            option_price_up = option_prices_array_up[step].mean()
-
-            S_down = self.S_0 * (1 - epsilon)
-            option_prices_array_down, _ = self.calc_option_price(S_down)
-            option_price_down = option_prices_array_down[step].mean()
-
-            delta = (option_price_up - option_price_down) / (2 * epsilon * self.S_0)
-            deltas[step] = delta
-
-        return deltas
-
-
-
+        option_price = (sum_payoff / self.num_sims) * exp(-r * self.T)
         
-    
-    
-                
+        delta = option_price.d(S_0)
+        vega = option_price.d(sigma) / 100
+        rho = option_price.d(r) / 100
 
-
-
-
-        
-
-
-    
-
-
-    
+        return option_price, delta, vega, rho
